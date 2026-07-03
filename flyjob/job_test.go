@@ -1,4 +1,4 @@
-package job
+package flyjob
 
 import (
 	"encoding/json"
