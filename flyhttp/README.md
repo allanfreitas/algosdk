@@ -19,23 +19,12 @@ import "github.com/allanfreitas/algosdk/flyhttp"
 
 ## 1. Success Responses
 
-### `SuccessResponse[T any]`
-
-Defines the structure for successful HTTP responses.
-
-```go
-type SuccessResponse[T any] struct {
-    Message string `json:"message,omitempty"`
-    Data    T      `json:"data,omitempty"`
-}
-```
-
 ### `Success` Constructor
 
-Creates a new `SuccessResponse` with the provided message and data payload.
+Returns the data directly to be serialized.
 
 ```go
-func Success[T any](message string, data T) SuccessResponse[T]
+func Success[T any](data T) T
 ```
 
 #### Example Usage
@@ -48,15 +37,35 @@ type User struct {
 
 // In your HTTP handler:
 user := User{ID: "123", Name: "Allan Freitas"}
-response := flyhttp.Success("User created successfully", user)
+response := flyhttp.Success(user)
 
 // JSON Output:
 // {
-//   "message": "User created successfully",
-//   "data": {
-//     "id": "123",
-//     "name": "Allan Freitas"
-//   }
+//   "id": "123",
+//   "name": "Allan Freitas"
+// }
+```
+
+### `SuccessMessage` Constructor
+
+Creates a response containing only a message.
+
+```go
+type SuccessMessageResponse struct {
+    Message string `json:"message"`
+}
+
+func SuccessMessage(message string) SuccessMessageResponse
+```
+
+#### Example Usage
+
+```go
+response := flyhttp.SuccessMessage("Operation completed successfully")
+
+// JSON Output:
+// {
+//   "message": "Operation completed successfully"
 // }
 ```
 
@@ -201,7 +210,7 @@ func RegisterHandler(c *echo.Context) error {
     }
 
     // Success flow
-    resp := flyhttp.Success("Registration initiated", map[string]string{"email": req.Email})
+    resp := flyhttp.Success(map[string]string{"email": req.Email})
     return c.JSON(http.StatusOK, resp)
 }
 ```
@@ -252,6 +261,6 @@ func myHandler(w http.ResponseWriter, r *http.Request) {
 
     w.Header().Set("Content-Type", "application/json")
     w.WriteHeader(http.StatusOK)
-    json.NewEncoder(w).Encode(flyhttp.Success("Success", "payload"))
+    json.NewEncoder(w).Encode(flyhttp.Success("payload"))
 }
 ```

@@ -1,24 +1,26 @@
 package flyhttp
 
-import "net/http"
+import (
+	"errors"
+	"net/http"
 
-// SuccessResponse define o padrão para respostas bem-sucedidas.
-type SuccessResponse[T any] struct {
-	Message string `json:"message,omitempty"`
-	Data    T      `json:"data,omitempty"`
+	"github.com/allanfreitas/algosdk/flyerrors"
+)
+
+// SuccessMessageResponse define o padrão para respostas com apenas uma mensagem.
+type SuccessMessageResponse struct {
+	Message string `json:"message"`
 }
 
-func Success[T any](message string, data T) SuccessResponse[T] {
-	return SuccessResponse[T]{
-		Message: message,
-		Data:    data,
-	}
+// Success retorna os dados diretamente para serem serializados no corpo da resposta.
+func Success[T any](data T) T {
+	return data
 }
 
-func SuccessNoData(message string) SuccessResponse[any] {
-	return SuccessResponse[any]{
+// SuccessMessage cria uma resposta contendo apenas uma mensagem.
+func SuccessMessage(message string) SuccessMessageResponse {
+	return SuccessMessageResponse{
 		Message: message,
-		Data:    nil,
 	}
 }
 
@@ -222,3 +224,43 @@ func ConflictWithErrors(detail string, errors ...ErrorDetail) ProblemDetails {
 		Errors: errors,
 	}
 }
+
+// ToHTTP converts a flyerrors.AppError (or an error wrapping one) into an HTTP
+// status code and a ProblemDetails body.
+// If err is nil or does not contain a flyerrors.AppError, it returns
+// 500 Internal Server Error with a generic message.
+func ToHTTP(err error) (int, ProblemDetails) {
+	appErr, ok := errors.AsType[*flyerrors.AppError](err)
+	if !ok {
+		return http.StatusInternalServerError, Internal("internal server error")
+	}
+
+	details := make([]ErrorDetail, len(appErr.Details()))
+	for i, d := range appErr.Details() {
+		details[i] = ErrorDetail{
+			Field: d.Field,
+			Code:  d.Code,
+			Value: d.Value,
+		}
+	}
+
+	switch appErr.Kind() {
+	case flyerrors.KindBadRequest:
+		return http.StatusBadRequest, BadRequestWithErrors(appErr.Error(), details...)
+	case flyerrors.KindUnauthorized:
+		return http.StatusUnauthorized, UnauthorizedWithErrors(appErr.Error(), details...)
+	case flyerrors.KindForbidden:
+		return http.StatusForbidden, ForbiddenWithErrors(appErr.Error(), details...)
+	case flyerrors.KindNotFound:
+		return http.StatusNotFound, NotFoundWithErrors(appErr.Error(), details...)
+	case flyerrors.KindConflict:
+		return http.StatusConflict, ConflictWithErrors(appErr.Error(), details...)
+	case flyerrors.KindValidation:
+		return http.StatusUnprocessableEntity, ValidationWithErrors(appErr.Error(), details...)
+	case flyerrors.KindServiceUnavailable:
+		return http.StatusServiceUnavailable, ServiceUnavailableWithErrors(appErr.Error(), details...)
+	default:
+		return http.StatusInternalServerError, Internal(appErr.Error())
+	}
+}
+
