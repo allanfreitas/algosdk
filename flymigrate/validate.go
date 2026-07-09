@@ -7,19 +7,19 @@ import (
 
 // Validate checks the consistency of migration history against local migration files.
 func (rf *Migrator) Validate(ctx context.Context) error {
-	pool, selfCreated, err := rf.getPool(ctx)
+	db, selfCreated, err := rf.getDB(ctx)
 	if err != nil {
 		return err
 	}
 	if selfCreated {
-		defer pool.Close()
+		defer db.Close()
 	}
 
-	conn, err := pool.Acquire(ctx)
+	conn, err := db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("rapidfly/migrate: failed to acquire connection: %w", err)
 	}
-	defer conn.Release()
+	defer conn.Close()
 
 	if err := rf.ensureMetadataTable(ctx, conn); err != nil {
 		return err

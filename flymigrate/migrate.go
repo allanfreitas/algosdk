@@ -2,11 +2,15 @@ package flymigrate
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"io/fs"
+	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/allanfreitas/algosdk/flymigrate/dialects/mysql"
+	"github.com/allanfreitas/algosdk/flymigrate/dialects/oracle"
+	"github.com/allanfreitas/algosdk/flymigrate/dialects/postgres"
 )
 
 // Config represents the configuration for the RapidFly migrator.
@@ -20,8 +24,10 @@ type Config struct {
 
 	// Optional embed.FS or custom filesystem
 	FS fs.FS
-	// Optional existing database connection pool to reuse
-	Pool *pgxpool.Pool
+	// Optional existing database connection to reuse
+	DB *sql.DB
+	// Strategy dialect to use (Postgres, MySQL, Oracle, etc.)
+	Dialect Dialect
 	// Optional flag to skip checksum validation
 	SkipChecksum bool
 }
@@ -73,24 +79,43 @@ func New(config Config) *Migrator {
 	if config.MigrationsPath == "" {
 		config.MigrationsPath = "database/migrations"
 	}
+	if config.Dialect == nil {
+		config.Dialect = detectDialect(&config)
+	}
 	return &Migrator{
 		config: config,
 	}
 }
 
+// detectDialect infers the database dialect to use based on the driver.
+func detectDialect(config *Config) Dialect {
+	var driverName string
+	if config.DB != nil {
+		driverName = fmt.Sprintf("%T", config.DB.Driver())
+	} else {
+		driverName = config.Driver
+	}
+
+	driverName = strings.ToLower(driverName)
+	if strings.Contains(driverName, "mysql") {
+		return &mysql.MySQLDialect{}
+	}
+	if strings.Contains(driverName, "oracle") || strings.Contains(driverName, "ora") || strings.Contains(driverName, "godror") {
+		return &oracle.OracleDialect{}
+	}
+	// Default to PostgreSQL
+	return &postgres.PostgresDialect{}
+}
+
 // fetchHistory retrieves all migration history from the database.
-func (rf *Migrator) fetchHistory(ctx context.Context, conn *pgxpool.Conn) ([]HistoryEntry, error) {
+func (rf *Migrator) fetchHistory(ctx context.Context, conn *sql.Conn) ([]HistoryEntry, error) {
 	if err := rf.validateTableName(); err != nil {
 		return nil, err
 	}
 
-	query := fmt.Sprintf(`
-		SELECT installed_rank, version, description, type, script, checksum, installed_by, installed_on, execution_time_ms, success
-		FROM %s
-		ORDER BY installed_rank ASC
-	`, rf.config.TableName)
+	query := rf.config.Dialect.SelectHistorySQL(rf.config.TableName)
 
-	rows, err := conn.Query(ctx, query)
+	rows, err := conn.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("rapidfly/migrate: failed to fetch history: %w", err)
 	}
@@ -100,6 +125,7 @@ func (rf *Migrator) fetchHistory(ctx context.Context, conn *pgxpool.Conn) ([]His
 	for rows.Next() {
 		var entry HistoryEntry
 		var versionVal *string
+		var successVal interface{}
 		err := rows.Scan(
 			&entry.InstalledRank,
 			&versionVal,
@@ -110,43 +136,58 @@ func (rf *Migrator) fetchHistory(ctx context.Context, conn *pgxpool.Conn) ([]His
 			&entry.InstalledBy,
 			&entry.InstalledOn,
 			&entry.ExecutionTimeMs,
-			&entry.Success,
+			&successVal,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("rapidfly/migrate: failed to scan history entry: %w", err)
 		}
+
+		// Convert successVal dynamically (Postgres boolean vs MySQL tinyint vs Oracle number)
+		switch v := successVal.(type) {
+		case bool:
+			entry.Success = v
+		case int64:
+			entry.Success = v != 0
+		case int32:
+			entry.Success = v != 0
+		case int:
+			entry.Success = v != 0
+		case uint8:
+			entry.Success = v != 0
+		default:
+			entry.Success = fmt.Sprintf("%v", v) == "true" || fmt.Sprintf("%v", v) == "1"
+		}
+
 		entry.Version = versionVal
 		history = append(history, entry)
 	}
 	return history, nil
 }
 
-// getDBUser gets the current connected PostgreSQL user.
-func (rf *Migrator) getDBUser(ctx context.Context, conn *pgxpool.Conn) string {
-	var user string
-	_ = conn.QueryRow(ctx, "SELECT CURRENT_USER").Scan(&user)
-	if user == "" {
-		return "rapidfly"
-	}
-	return user
+// getDBUser gets the current connected database user.
+func (rf *Migrator) getDBUser(ctx context.Context, conn *sql.Conn) string {
+	return rf.config.Dialect.GetDBUser(ctx, conn)
 }
 
 // recordMigration inserts a record of a migration execution.
-func (rf *Migrator) recordMigration(ctx context.Context, conn *pgxpool.Conn, m *Migration, executionTimeMs int64, success bool, installedBy string) error {
+func (rf *Migrator) recordMigration(ctx context.Context, conn *sql.Conn, m *Migration, executionTimeMs int64, success bool, installedBy string) error {
 	var versionVal *string
 	if m.Version != "" {
 		versionVal = &m.Version
 	}
 
-	query := fmt.Sprintf(`
-		INSERT INTO %s (installed_rank, version, description, type, script, checksum, installed_by, installed_on, execution_time_ms, success)
-		VALUES (
-			(SELECT COALESCE(MAX(installed_rank), 0) + 1 FROM %s),
-			$1, $2, $3, $4, $5, $6, NOW(), $7, $8
-		)
-	`, rf.config.TableName, rf.config.TableName)
+	query := rf.config.Dialect.InsertMigrationSQL(rf.config.TableName)
 
-	_, err := conn.Exec(ctx, query, versionVal, m.Description, m.Type, m.Script, m.Checksum, installedBy, executionTimeMs, success)
+	var successArg interface{} = success
+	if _, ok := rf.config.Dialect.(*oracle.OracleDialect); ok {
+		if success {
+			successArg = 1
+		} else {
+			successArg = 0
+		}
+	}
+
+	_, err := conn.ExecContext(ctx, query, versionVal, m.Description, m.Type, m.Script, m.Checksum, installedBy, executionTimeMs, successArg)
 	if err != nil {
 		return fmt.Errorf("rapidfly/migrate: failed to record migration history: %w", err)
 	}
@@ -177,8 +218,6 @@ func (rf *Migrator) validateState(localMigs []*Migration, history []HistoryEntry
 		if entry.Type == "SQL" && entry.Version != nil {
 			localMig, exists := localVersionMap[*entry.Version]
 			if !exists {
-				// State is Missing, which is not an automatic hard failure under "Validation Rules"
-				// unless specified. We skip.
 				continue
 			}
 
@@ -208,44 +247,43 @@ func getLatestRepeatableEntry(history []HistoryEntry, script string) *HistoryEnt
 	return latest
 }
 
-// getPool returns the connection pool.
-func (rf *Migrator) getPool(ctx context.Context) (*pgxpool.Pool, bool, error) {
-	if rf.config.Pool != nil {
-		return rf.config.Pool, false, nil
+// getDB returns the database connection pool.
+func (rf *Migrator) getDB(ctx context.Context) (*sql.DB, bool, error) {
+	if rf.config.DB != nil {
+		return rf.config.DB, false, nil
 	}
 	if rf.config.DSN == "" {
-		return nil, false, fmt.Errorf("rapidfly/migrate: DSN or Pool must be configured")
+		return nil, false, fmt.Errorf("rapidfly/migrate: DSN or DB must be configured")
 	}
-	poolConfig, err := pgxpool.ParseConfig(rf.config.DSN)
-	if err != nil {
-		return nil, false, fmt.Errorf("rapidfly/migrate: failed to parse DSN: %w", err)
+	if rf.config.Driver == "" {
+		return nil, false, fmt.Errorf("rapidfly/migrate: Driver must be configured when using DSN")
 	}
-	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+	db, err := sql.Open(rf.config.Driver, rf.config.DSN)
 	if err != nil {
 		return nil, false, fmt.Errorf("rapidfly/migrate: failed to connect to database: %w", err)
 	}
-	return pool, true, nil
+	return db, true, nil
 }
 
 // executeMigration runs a single migration SQL in a transaction and records results.
-func (rf *Migrator) executeMigration(ctx context.Context, conn *pgxpool.Conn, m *Migration, installedBy string) error {
+func (rf *Migrator) executeMigration(ctx context.Context, conn *sql.Conn, m *Migration, installedBy string) error {
 	start := time.Now()
 
-	tx, err := conn.Begin(ctx)
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("rapidfly/migrate: failed to start transaction: %w", err)
 	}
 
-	_, err = tx.Exec(ctx, m.Content)
+	_, err = tx.ExecContext(ctx, m.Content)
 	elapsedMs := time.Since(start).Milliseconds()
 
 	if err != nil {
-		_ = tx.Rollback(ctx)
+		_ = tx.Rollback()
 		_ = rf.recordMigration(ctx, conn, m, elapsedMs, false, installedBy)
 		return fmt.Errorf("rapidfly/migrate: failed migration %s: %w", m.Script, err)
 	}
 
-	err = tx.Commit(ctx)
+	err = tx.Commit()
 	if err != nil {
 		return fmt.Errorf("rapidfly/migrate: failed to commit transaction: %w", err)
 	}

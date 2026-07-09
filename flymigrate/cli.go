@@ -2,19 +2,18 @@ package flymigrate
 
 import (
 	"context"
+	"database/sql"
 	"flag"
 	"fmt"
 	"io/fs"
 	"os"
 	"text/tabwriter"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // newMigrator creates a configured migrate.Migrator instance using embedded migrations and the database pool.
-func newMigrator(db *pgxpool.Pool, fsys fs.FS, migrationsPath string) *Migrator {
+func newMigrator(db *sql.DB, fsys fs.FS, migrationsPath string) *Migrator {
 	return New(Config{
-		Pool:            db,
+		DB:              db,
 		FS:              fsys,
 		MigrationsPath:  migrationsPath,
 		ValidateOnStart: false, // We'll handle validation manually in the CLI commands
@@ -23,7 +22,7 @@ func newMigrator(db *pgxpool.Pool, fsys fs.FS, migrationsPath string) *Migrator 
 }
 
 // MigrateDatabase executes pending migrations.
-func MigrateDatabase(ctx context.Context, db *pgxpool.Pool, fsys fs.FS, migrationsPath string, args []string) error {
+func MigrateDatabase(ctx context.Context, db *sql.DB, fsys fs.FS, migrationsPath string, args []string) error {
 	rf := newMigrator(db, fsys, migrationsPath)
 	fmt.Println("rapidfly: Starting database migration...")
 
@@ -62,7 +61,7 @@ func MigrateDatabase(ctx context.Context, db *pgxpool.Pool, fsys fs.FS, migratio
 }
 
 // ValidateDatabase checks database schema history consistency.
-func ValidateDatabase(ctx context.Context, db *pgxpool.Pool, fsys fs.FS, migrationsPath string) error {
+func ValidateDatabase(ctx context.Context, db *sql.DB, fsys fs.FS, migrationsPath string) error {
 	rf := newMigrator(db, fsys, migrationsPath)
 	fmt.Println("rapidfly: Validating schema history consistency...")
 
@@ -76,7 +75,7 @@ func ValidateDatabase(ctx context.Context, db *pgxpool.Pool, fsys fs.FS, migrati
 }
 
 // InfoDatabase displays schema migration status.
-func InfoDatabase(ctx context.Context, db *pgxpool.Pool, fsys fs.FS, migrationsPath string) error {
+func InfoDatabase(ctx context.Context, db *sql.DB, fsys fs.FS, migrationsPath string) error {
 	rf := newMigrator(db, fsys, migrationsPath)
 	info, err := rf.Info(ctx)
 	if err != nil {
@@ -112,7 +111,7 @@ func InfoDatabase(ctx context.Context, db *pgxpool.Pool, fsys fs.FS, migrationsP
 }
 
 // RepairDatabase repairs metadata table inconsistencies.
-func RepairDatabase(ctx context.Context, db *pgxpool.Pool, fsys fs.FS, migrationsPath string) error {
+func RepairDatabase(ctx context.Context, db *sql.DB, fsys fs.FS, migrationsPath string) error {
 	rf := newMigrator(db, fsys, migrationsPath)
 	fmt.Println("rapidfly: Repairing metadata inconsistencies...")
 
