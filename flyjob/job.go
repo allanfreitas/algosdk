@@ -2,15 +2,17 @@ package flyjob
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
-
-	"github.com/jackc/pgx/v5/pgxpool"
+	"strings"
 )
 
 // Config configures the job package.
 type Config struct {
-	// Pool is the required database connection pool.
-	Pool *pgxpool.Pool
+	// DB is the required database connection.
+	DB *sql.DB
+	// Strategy dialect to use. Autodetected if nil.
+	Dialect Dialect
 	// JobsTable is the table name for jobs. Defaults to "jobs".
 	JobsTable string
 	// AttemptsTable is the table name for job attempts. Defaults to "job_attempts".
@@ -31,21 +33,45 @@ func New(cfg Config) *Client {
 	if cfg.AttemptsTable == "" {
 		cfg.AttemptsTable = "job_attempts"
 	}
+	if cfg.Dialect == nil {
+		cfg.Dialect = detectDialect(&cfg)
+	}
 	return &Client{
 		cfg:  cfg,
 		repo: newRepository(cfg),
 	}
 }
 
+// detectDialect infers the database dialect to use based on the driver.
+func detectDialect(config *Config) Dialect {
+	var driverName string
+	if config.DB != nil {
+		driverName = fmt.Sprintf("%T", config.DB.Driver())
+	}
+
+	driverName = strings.ToLower(driverName)
+	if strings.Contains(driverName, "mysql") {
+		return &MySQLDialect{}
+	}
+	if strings.Contains(driverName, "oracle") || strings.Contains(driverName, "ora") || strings.Contains(driverName, "godror") {
+		return &OracleDialect{}
+	}
+	// Default to PostgreSQL
+	return &PostgresDialect{}
+}
+
 // EnsureSchema creates the jobs and job_attempts tables if they do not exist.
 // It is safe to call on every application start.
 func (c *Client) EnsureSchema(ctx context.Context) error {
-	conn, err := c.cfg.Pool.Acquire(ctx)
+	if c.cfg.DB == nil {
+		return fmt.Errorf("rapidfly/job: DB must be configured to EnsureSchema")
+	}
+	conn, err := c.cfg.DB.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("rapidfly/job: failed to acquire connection: %w", err)
 	}
-	defer conn.Release()
-	return c.repo.ensureSchema(ctx, conn.Conn())
+	defer conn.Close()
+	return c.repo.ensureSchema(ctx, conn)
 }
 
 // NewWorker creates a new WorkerPool bound to this client.
