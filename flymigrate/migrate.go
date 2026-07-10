@@ -1,6 +1,7 @@
 package flymigrate
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"fmt"
@@ -74,7 +75,7 @@ type StatusEntry struct {
 // New creates a new Migrator instance.
 func New(config Config) *Migrator {
 	if config.TableName == "" {
-		config.TableName = "rapidfly_schema_history"
+		config.TableName = "flymigrate_history"
 	}
 	if config.MigrationsPath == "" {
 		config.MigrationsPath = "database/migrations"
@@ -274,13 +275,26 @@ func (rf *Migrator) executeMigration(ctx context.Context, conn *sql.Conn, m *Mig
 		return fmt.Errorf("rapidfly/migrate: failed to start transaction: %w", err)
 	}
 
-	_, err = tx.ExecContext(ctx, m.Content)
-	elapsedMs := time.Since(start).Milliseconds()
-
+	statements, err := parseSQLStatements(m.Content)
 	if err != nil {
 		_ = tx.Rollback()
+		_ = rf.recordMigration(ctx, conn, m, 0, false, installedBy)
+		return fmt.Errorf("rapidfly/migrate: failed to parse migration %s: %w", m.Script, err)
+	}
+
+	var execErr error
+	for _, stmt := range statements {
+		_, execErr = tx.ExecContext(ctx, stmt)
+		if execErr != nil {
+			break
+		}
+	}
+	elapsedMs := time.Since(start).Milliseconds()
+
+	if execErr != nil {
+		_ = tx.Rollback()
 		_ = rf.recordMigration(ctx, conn, m, elapsedMs, false, installedBy)
-		return fmt.Errorf("rapidfly/migrate: failed migration %s: %w", m.Script, err)
+		return fmt.Errorf("rapidfly/migrate: failed migration %s: %w", m.Script, execErr)
 	}
 
 	err = tx.Commit()
@@ -294,4 +308,75 @@ func (rf *Migrator) executeMigration(ctx context.Context, conn *sql.Conn, m *Mig
 	}
 
 	return nil
+}
+
+// parseSQLStatements parses migration SQL content line-by-line,
+// correctly handling PL/SQL blocks and normal SQL queries.
+func parseSQLStatements(content string) ([]string, error) {
+	var currentStatement strings.Builder
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	isPLSQL := false
+	var statements []string
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
+
+		// Ignore empty lines and comments
+		if trimmed == "" || strings.HasPrefix(trimmed, "--") {
+			continue
+		}
+
+		// Detect if we are starting a PL/SQL block
+		upperLine := strings.ToUpper(trimmed)
+		if strings.HasPrefix(upperLine, "CREATE ") || strings.HasPrefix(upperLine, "DECLARE") || strings.HasPrefix(upperLine, "BEGIN") {
+			if strings.Contains(upperLine, "FUNCTION") || strings.Contains(upperLine, "PROCEDURE") || strings.Contains(upperLine, "TRIGGER") || strings.Contains(upperLine, "PACKAGE") {
+				isPLSQL = true
+			}
+		}
+
+		// If it's the end of PL/SQL block (a line containing only "/")
+		if isPLSQL && trimmed == "/" {
+			stmt := currentStatement.String()
+			if len(strings.TrimSpace(stmt)) > 0 {
+				statements = append(statements, stmt)
+			}
+			currentStatement.Reset()
+			isPLSQL = false
+			continue
+		}
+
+		// Add the line to the current statement
+		currentStatement.WriteString(line + "\n")
+
+		// If it is a normal SQL query and ends with ";"
+		if !isPLSQL && strings.HasSuffix(trimmed, ";") {
+			stmt := currentStatement.String()
+			// Remove the ";" from the end before sending
+			stmt = strings.TrimSuffix(strings.TrimSpace(stmt), ";")
+			if len(stmt) > 0 {
+				statements = append(statements, stmt)
+			}
+			currentStatement.Reset()
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	// Handle any remaining statement
+	if currentStatement.Len() > 0 {
+		stmt := strings.TrimSpace(currentStatement.String())
+		if stmt != "" {
+			if !isPLSQL {
+				stmt = strings.TrimSuffix(stmt, ";")
+			}
+			if len(stmt) > 0 {
+				statements = append(statements, stmt)
+			}
+		}
+	}
+
+	return statements, nil
 }

@@ -2,6 +2,7 @@ package flymigrate
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -133,5 +134,42 @@ func TestCompareVersions(t *testing.T) {
 				t.Errorf("compareVersions(%s, %s) = %d, want %d", tt.v1, tt.v2, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestParseSQLStatements(t *testing.T) {
+	sqlContent := `
+-- This is a comment
+SELECT * FROM users;
+
+CREATE OR REPLACE PROCEDURE test_proc AS
+BEGIN
+    INSERT INTO logs (msg) VALUES ('test');
+    COMMIT;
+END;
+/
+
+INSERT INTO users (name) VALUES ('John');
+`
+
+	got, err := parseSQLStatements(sqlContent)
+	if err != nil {
+		t.Fatalf("parseSQLStatements failed: %v", err)
+	}
+
+	want := []string{
+		"SELECT * FROM users",
+		"CREATE OR REPLACE PROCEDURE test_proc AS\nBEGIN\n    INSERT INTO logs (msg) VALUES ('test');\n    COMMIT;\nEND;\n",
+		"INSERT INTO users (name) VALUES ('John')",
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("expected %d statements, got %d. Statements: %v", len(want), len(got), got)
+	}
+
+	for i := range want {
+		if strings.TrimSpace(got[i]) != strings.TrimSpace(want[i]) {
+			t.Errorf("statement %d does not match.\nExpected:\n%s\n\nGot:\n%s", i, want[i], got[i])
+		}
 	}
 }
